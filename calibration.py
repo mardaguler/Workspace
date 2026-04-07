@@ -6,7 +6,7 @@ import os
 
 # --- AYARLAR ---
 CHESSBOARD_SIZE = (7, 5)   # SENİN TAHTAN İÇİN DOĞRU
-SQUARE_SIZE = 25.0         # mm (ölçerek doğrula)
+SQUARE_SIZE = 36.0         # mm (ölçerek doğrula = 36mm)
 
 IMAGE_PATH = '/home/ozu/Desktop/Workspace/Calibration _Photos/*.png'
 SAVE_DIR = '/home/ozu/Desktop/Workspace/Calibration_Results'

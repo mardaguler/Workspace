@@ -1,35 +1,67 @@
 from picamera2 import Picamera2
 import time
 from datetime import datetime
+import cv2
+import numpy as np
 
-# Kamera başlat
+# =========================
+# Kalibrasyon verisini yükle
+# =========================
+data = np.load("Calibration_Results/camera_calibration.npz")
+camera_matrix = data["mtx"]
+dist_coeffs = data["dist"]
+
 camera = Picamera2()
 
-# Çözünürlük ayarla (örnek: 1920x1080)
 config = camera.create_still_configuration(
-    main={"size": (1920, 1080)},
-    controls={"AeEnable": 1, "AwbEnable": 1} # make the camera use auto exposure and auto white balance
+    main={"size": (3280, 2464)},
+    controls={"AeEnable": 1, "AwbEnable": 1}
 )
 camera.configure(config)
 
-# Kısa bir bekleme
 time.sleep(2)
-
-# Kamerayı başlat
 camera.start()
 
-# Tarih ve saat ile dosya adı oluştur
-timestamp = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
-filename = f"Captured/{timestamp}.png"
+frame = camera.capture_array()
 
-# Fotoğraf çek ve kaydet
-camera.capture_file(filename)
+timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
-# Kamerayı durdur ve kapat
+
+raw_filename = f"Captured/raw_{timestamp}.png"
+undist_filename = f"Captured/undist_{timestamp}.png"
+# opencv use bgr format, picamera use rgb format, so we need to convert to bgr
+# to work in opencv
+frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+# RAW kaydet
+cv2.imwrite(raw_filename, frame)
+
+# =========================
+# UNDISTORT
+# =========================
+"""
+h, w = frame.shape[:2]
+
+new_camera_matrix, roi = cv2.getOptimalNewCameraMatrix(
+    camera_matrix, dist_coeffs, (w, h), 1, (w, h)
+)
+
+undistorted = cv2.undistort(
+    frame, camera_matrix, dist_coeffs, None, new_camera_matrix
+)
+
+# UNDISTORTED kaydet
+cv2.imwrite(undist_filename, undistorted)
+"""
+
 camera.stop()
 camera.close()
 
-print(f"Fotoğraf çekildi ve '{filename}' olarak kaydedildi.")
+print("Fotoğraf çekildi:")
+print(f"  RAW: {raw_filename}")
+#print(f"  UNDISTORTED: {undist_filename}")
+
+print(f"Fotoğraf çekildi ve '{raw_filename}' olarak kaydedildi.")
+#print(f"Fotoğraf çekildi ve '{undist_filename}' olarak kaydedildi.")
 """
 except subprocess.CalledProcessError as e:
     print(f"Hata: Fotoğraf çekilemedi. Hata kodu: {e.returncode}")
