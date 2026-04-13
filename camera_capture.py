@@ -4,9 +4,6 @@ from datetime import datetime
 import cv2
 import numpy as np
 
-# =========================
-# Kalibrasyon verisini yükle
-# =========================
 data = np.load("Calibration_Results/camera_calibration.npz")
 camera_matrix = data["mtx"]
 dist_coeffs = data["dist"]
