@@ -10,8 +10,13 @@ IMAGE_PATH = "/home/ozu/Desktop/Workspace/Annotated Images/Ann2_Chess.png"
 PATTERN_SIZE = (7, 5)
 SQUARE_SIZE_CM = 3.4
 
-# bunu mouse ile gördüğün GERÇEK köşeye göre güncelle
-ORIGIN_PX = (3215, 2415)
+# Origin'i tek nokta olarak değil,
+# iki iç kenarın kesişimi olarak tanımla:
+# - RIGHT_INNER_X  = sağ cetvelin sol iç kenarı
+# - BOTTOM_INNER_Y = alt cetvelin üst iç kenarı
+RIGHT_INNER_X = 3280
+BOTTOM_INNER_Y = 2464
+ORIGIN_PX = (RIGHT_INNER_X, BOTTOM_INNER_Y)
 
 OUTPUT_DIR = os.path.dirname(IMAGE_PATH)
 
@@ -23,7 +28,7 @@ UPPER_RED_1 = np.array([10, 255, 255], dtype=np.uint8)
 LOWER_RED_2 = np.array([170, 150, 150], dtype=np.uint8)
 UPPER_RED_2 = np.array([180, 255, 255], dtype=np.uint8)
 
-# red point ile blue annotation arasında kabul edilen maksimum mesafe (pixel)
+# Red point ile blue annotation arasında kabul edilen maksimum mesafe
 BLUE_ASSOC_MARGIN = 35
 
 
@@ -74,10 +79,6 @@ def build_blue_mask(image):
 
 
 def detect_blue_components(blue_mask):
-    """
-    Mavi annotation'ları connected component olarak bulur.
-    Label + kutu birleşmiş olsa bile component olarak tutulur.
-    """
     num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(blue_mask, connectivity=8)
     comps = []
 
@@ -88,9 +89,20 @@ def detect_blue_components(blue_mask):
         h = stats[i, cv2.CC_STAT_HEIGHT]
         area = stats[i, cv2.CC_STAT_AREA]
 
-        if area < 40:
+        # 1) minimum boyut
+        if w < 30 or h < 30:
             continue
-        if w < 8 or h < 8:
+
+        # 2) çok ince çizgileri sil
+        aspect = w / float(h)
+        if aspect < 0.3 or aspect > 3.5:
+            continue
+
+        # 3) doluluk oranı (rectangular mı?)
+        rect_area = w * h
+        fill_ratio = area / float(rect_area)
+
+        if fill_ratio < 0.15:
             continue
 
         comps.append((x, y, w, h))
@@ -99,6 +111,9 @@ def detect_blue_components(blue_mask):
 
 
 def detect_all_red_points(image):
+    """
+    Tüm kırmızı küçük noktaları bulur.
+    """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     mask1 = cv2.inRange(hsv, LOWER_RED_1, UPPER_RED_1)
@@ -139,7 +154,6 @@ def point_near_component(px, py, comp, margin=35):
 def filter_red_points_by_blue_components(red_points, blue_components, margin=35):
     """
     Her red point için, herhangi bir blue component'e yeterince yakın mı diye bak.
-    Böylece kutu çıkarımı eksik olsa bile red point'ler korunur.
     """
     filtered = []
 
@@ -164,16 +178,22 @@ def main():
     if img is None:
         raise FileNotFoundError(f"Görüntü okunamadı: {IMAGE_PATH}")
 
-    # 1) homography
+    # 1) Homography
     H_img_to_plane, corners = compute_homography_from_chessboard(
         img, PATTERN_SIZE, SQUARE_SIZE_CM
     )
 
-    # 2) masks
+    # 2) Blue components
     blue_mask = build_blue_mask(img)
     blue_components = detect_blue_components(blue_mask)
 
+    if len(blue_components) == 0:
+        raise RuntimeError("Hiç mavi component bulunamadı.")
+
+    # 3) All red points
     red_points_all, red_mask_all, red_mask_kept_all = detect_all_red_points(img)
+
+    # 4) Keep only red points near blue components
     red_points = filter_red_points_by_blue_components(
         red_points_all,
         blue_components,
@@ -183,17 +203,19 @@ def main():
     if len(red_points) == 0:
         raise RuntimeError("Mavi annotation yakınında hiç red point bulunamadı.")
 
-    # 3) origin
+    # 5) Origin -> plane
     origin_px = ORIGIN_PX
     origin_plane = transform_points([origin_px], H_img_to_plane)[0]
 
-    # 4) red points -> plane
+    # 6) Red points -> plane
     red_points_plane = transform_points(
         [(x, y) for (x, y, area) in red_points],
         H_img_to_plane
     )
 
-    # 5) coordinates
+    # 7) Coordinates
+    # +X = sola
+    # +Y = yukarı
     results = []
     for (px, py, area), p_plane in zip(red_points, red_points_plane):
         X_cm = origin_plane[0] - p_plane[0]
@@ -202,25 +224,29 @@ def main():
 
     results = sorted(results, key=lambda r: (int(r[0][1] // 40), r[0][0]))
 
-    # 6) visualize
+    # 8) Visualization
     vis = img.copy()
     cv2.drawChessboardCorners(vis, PATTERN_SIZE, corners, True)
 
-    ox, oy = int(round(origin_px[0])), int(round(origin_px[1]))
-    cv2.circle(vis, (ox, oy), 10, (0, 0, 255), -1)
+    # Blue component rectangles
+    for (x, y, w, h) in blue_components:
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
+
+    # Origin reference lines
+    cv2.line(vis, (RIGHT_INNER_X, 0), (RIGHT_INNER_X, vis.shape[0] - 1), (0, 255, 255), 2)
+    cv2.line(vis, (0, BOTTOM_INNER_Y), (vis.shape[1] - 1, BOTTOM_INNER_Y), (0, 255, 255), 2)
+
+    ox, oy = ORIGIN_PX
+    cv2.circle(vis, (int(ox), int(oy)), 10, (0, 0, 255), -1)
     cv2.putText(
         vis,
         "origin",
-        (ox + 10, oy - 10),
+        (int(ox) + 10, int(oy) - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
         (0, 255, 255),
         2
     )
-
-    # blue components çiz
-    for (x, y, w, h) in blue_components:
-        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
 
     print("Detected points:")
     for i, ((px, py, area), p_plane, X_cm, Y_cm) in enumerate(results):
@@ -241,12 +267,12 @@ def main():
             f"coord=({X_cm:.2f},{Y_cm:.2f}) cm"
         )
 
-    # red filtered mask for visualization
+    # 9) Filtered red mask visualization
     red_mask_filtered = np.zeros_like(red_mask_all)
     for px, py, area in red_points:
         cv2.circle(red_mask_filtered, (int(round(px)), int(round(py))), 4, 255, -1)
 
-    # save
+    # 10) Save outputs
     out_blue = os.path.join(OUTPUT_DIR, "blue_mask_final.png")
     out_red_all = os.path.join(OUTPUT_DIR, "red_mask_all.png")
     out_red_filtered = os.path.join(OUTPUT_DIR, "red_mask_filtered_by_blue_components.png")
