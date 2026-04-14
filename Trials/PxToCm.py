@@ -10,26 +10,27 @@ IMAGE_PATH = "/home/ozu/Desktop/Workspace/Annotated Images/Ann2_Chess.png"
 PATTERN_SIZE = (7, 5)
 SQUARE_SIZE_CM = 3.4
 
-# Origin'i tek nokta olarak değil,
-# iki iç kenarın kesişimi olarak tanımla:
-# - RIGHT_INNER_X  = sağ cetvelin sol iç kenarı
-# - BOTTOM_INNER_Y = alt cetvelin üst iç kenarı
+# Origin = senin elle belirlediğin gerçek köşe
+# (sağa/sola, yukarı/aşağı gerektiği kadar düzelt)
 RIGHT_INNER_X = 3280
 BOTTOM_INNER_Y = 2464
 ORIGIN_PX = (RIGHT_INNER_X, BOTTOM_INNER_Y)
 
 OUTPUT_DIR = os.path.dirname(IMAGE_PATH)
 
+# Blue annotation HSV
 LOWER_BLUE = np.array([100, 100, 80], dtype=np.uint8)
 UPPER_BLUE = np.array([130, 255, 255], dtype=np.uint8)
 
+# Red point HSV
 LOWER_RED_1 = np.array([0, 150, 150], dtype=np.uint8)
 UPPER_RED_1 = np.array([10, 255, 255], dtype=np.uint8)
 LOWER_RED_2 = np.array([170, 150, 150], dtype=np.uint8)
 UPPER_RED_2 = np.array([180, 255, 255], dtype=np.uint8)
 
-# Red point ile blue annotation arasında kabul edilen maksimum mesafe
-BLUE_ASSOC_MARGIN = 35
+# Red point'in çevresinde ne kadar mavi piksel aranacak
+BLUE_NEIGHBOR_RADIUS = 60
+BLUE_MIN_PIXELS = 40
 
 
 # =========================================================
@@ -78,42 +79,7 @@ def build_blue_mask(image):
     return mask
 
 
-def detect_blue_components(blue_mask):
-    num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(blue_mask, connectivity=8)
-    comps = []
-
-    for i in range(1, num_labels):
-        x = stats[i, cv2.CC_STAT_LEFT]
-        y = stats[i, cv2.CC_STAT_TOP]
-        w = stats[i, cv2.CC_STAT_WIDTH]
-        h = stats[i, cv2.CC_STAT_HEIGHT]
-        area = stats[i, cv2.CC_STAT_AREA]
-
-        # 1) minimum boyut
-        if w < 30 or h < 30:
-            continue
-
-        # 2) çok ince çizgileri sil
-        aspect = w / float(h)
-        if aspect < 0.3 or aspect > 3.5:
-            continue
-
-        # 3) doluluk oranı (rectangular mı?)
-        rect_area = w * h
-        fill_ratio = area / float(rect_area)
-
-        if fill_ratio < 0.15:
-            continue
-
-        comps.append((x, y, w, h))
-
-    return comps
-
-
 def detect_all_red_points(image):
-    """
-    Tüm kırmızı küçük noktaları bulur.
-    """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
     mask1 = cv2.inRange(hsv, LOWER_RED_1, UPPER_RED_1)
@@ -123,7 +89,9 @@ def detect_all_red_points(image):
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel, iterations=1)
 
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(red_mask, connectivity=8)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(
+        red_mask, connectivity=8
+    )
 
     points = []
     kept_mask = np.zeros_like(red_mask)
@@ -142,32 +110,34 @@ def detect_all_red_points(image):
     return points, red_mask, kept_mask
 
 
-def point_near_component(px, py, comp, margin=35):
-    x, y, w, h = comp
-    return (
-        (x - margin) <= px <= (x + w + margin)
-        and
-        (y - margin) <= py <= (y + h + margin)
-    )
-
-
-def filter_red_points_by_blue_components(red_points, blue_components, margin=35):
+def keep_red_points_near_blue_pixels(red_points, blue_mask, radius=60, min_blue_pixels=40):
     """
-    Her red point için, herhangi bir blue component'e yeterince yakın mı diye bak.
+    Her red point için çevresinde yeterince mavi piksel var mı bakar.
+    Böylece blue box / component çıkarmaya gerek kalmaz.
     """
-    filtered = []
+    kept = []
+    h, w = blue_mask.shape[:2]
 
     for px, py, area in red_points:
-        keep = False
-        for comp in blue_components:
-            if point_near_component(px, py, comp, margin):
-                keep = True
-                break
-        if keep:
-            filtered.append((px, py, area))
+        cx = int(round(px))
+        cy = int(round(py))
 
-    filtered = sorted(filtered, key=lambda p: (int(p[1] // 40), p[0]))
-    return filtered
+        x0 = max(0, cx - radius)
+        y0 = max(0, cy - radius)
+        x1 = min(w, cx + radius + 1)
+        y1 = min(h, cy + radius + 1)
+
+        roi = blue_mask[y0:y1, x0:x1]
+        if roi.size == 0:
+            continue
+
+        blue_count = cv2.countNonZero(roi)
+
+        if blue_count >= min_blue_pixels:
+            kept.append((px, py, area))
+
+    kept = sorted(kept, key=lambda p: (int(p[1] // 40), p[0]))
+    return kept
 
 
 # =========================================================
@@ -183,21 +153,18 @@ def main():
         img, PATTERN_SIZE, SQUARE_SIZE_CM
     )
 
-    # 2) Blue components
+    # 2) Blue mask
     blue_mask = build_blue_mask(img)
-    blue_components = detect_blue_components(blue_mask)
-
-    if len(blue_components) == 0:
-        raise RuntimeError("Hiç mavi component bulunamadı.")
 
     # 3) All red points
     red_points_all, red_mask_all, red_mask_kept_all = detect_all_red_points(img)
 
-    # 4) Keep only red points near blue components
-    red_points = filter_red_points_by_blue_components(
+    # 4) Keep only red points that are near blue pixels
+    red_points = keep_red_points_near_blue_pixels(
         red_points_all,
-        blue_components,
-        margin=BLUE_ASSOC_MARGIN
+        blue_mask,
+        radius=BLUE_NEIGHBOR_RADIUS,
+        min_blue_pixels=BLUE_MIN_PIXELS
     )
 
     if len(red_points) == 0:
@@ -228,11 +195,7 @@ def main():
     vis = img.copy()
     cv2.drawChessboardCorners(vis, PATTERN_SIZE, corners, True)
 
-    # Blue component rectangles
-    for (x, y, w, h) in blue_components:
-        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 255), 2)
-
-    # Origin reference lines
+    # origin reference lines
     cv2.line(vis, (RIGHT_INNER_X, 0), (RIGHT_INNER_X, vis.shape[0] - 1), (0, 255, 255), 2)
     cv2.line(vis, (0, BOTTOM_INNER_Y), (vis.shape[1] - 1, BOTTOM_INNER_Y), (0, 255, 255), 2)
 
@@ -275,7 +238,7 @@ def main():
     # 10) Save outputs
     out_blue = os.path.join(OUTPUT_DIR, "blue_mask_final.png")
     out_red_all = os.path.join(OUTPUT_DIR, "red_mask_all.png")
-    out_red_filtered = os.path.join(OUTPUT_DIR, "red_mask_filtered_by_blue_components.png")
+    out_red_filtered = os.path.join(OUTPUT_DIR, "red_mask_filtered_by_blue_pixels.png")
     out_vis = os.path.join(OUTPUT_DIR, "origin_and_red_points_debug.png")
 
     cv2.imwrite(out_blue, blue_mask)
