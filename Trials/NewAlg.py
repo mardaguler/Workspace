@@ -21,7 +21,7 @@ RED_DOT_RADIUS = 10
 # Area extends to -X and +Y directions.
 WORLD_POINTS = np.array([
     [0, 0],          # P0: origin / ruler intersection
-    [100, 0],       # P1: -X direction, 100 cm point
+    [100, 0],       # P1: +X direction(relatively), 100 cm point
     [100, 100],     # P2: opposite corner
     [0, 100],        # P3: +Y direction, 100 cm point
 ], dtype=np.float32)
