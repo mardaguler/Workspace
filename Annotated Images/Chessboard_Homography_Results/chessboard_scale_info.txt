@@ -1,0 +1,21 @@
+Origin shift using local top-left square vectors
+inner_origin_px = [664.38165 187.92447]
+outer_origin_px = [590.9785  112.74599]
+x_square_vec_px = [73.42938    1.5001373]
+y_square_vec_px = [-2.6245117e-02  7.3678345e+01]
+x_square_px = 73.4447 px
+y_square_px = 73.6783 px
+local px_per_cm_x = 21.6014 px/cm
+local px_per_cm_y = 21.6701 px/cm
+
+Workspace axis lengths
+X_AXIS_LENGTH_CM = 96.0000 cm
+Y_AXIS_LENGTH_CM = 103.0000 cm
+
+Average scale using all adjacent chessboard intervals
+avg px_per_square_x = 73.0750 px
+avg px_per_square_y = 73.6783 px
+avg px_per_cm_x = 21.4926 px/cm
+avg px_per_cm_y = 21.6701 px/cm
+
+Note: px/cm is only an approximate local value because perspective changes scale across the image.

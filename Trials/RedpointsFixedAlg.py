@@ -11,12 +11,19 @@ IMAGE_PATH = "/home/ozu/Desktop/Workspace/Captured/raw_2026-05-05_11-57-21.png"
 OUTPUT_DIR = "/home/ozu/Desktop/Workspace/Annotated Images/RedPoint_Homography_Results"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# =========================================================
+# COORDINATE SYSTEM
+# =========================================================
 # 1 m x 1 m working area, in cm
-# Coordinate system:
-# P0 = top-left corner / origin      -> (0, 0)
-# P1 = top-right corner / +X 100 cm  -> (100, 0)
-# P2 = bottom-right corner           -> (100, 100)
-# P3 = bottom-left corner / +Y 100 cm-> (0, 100)
+#
+# P0 = top-left corner / origin       -> (0, 0)
+# P1 = top-right corner / +X 100 cm   -> (100, 0)
+# P2 = bottom-right corner            -> (100, 100)
+# P3 = bottom-left corner / +Y 100 cm -> (0, 100)
+#
+# +X direction = right
+# +Y direction = down
+
 WORLD_POINTS = np.array([
     [0, 0],        # P0: top-left / origin
     [100, 0],      # P1: top-right / +X 100 cm
@@ -24,15 +31,21 @@ WORLD_POINTS = np.array([
     [0, 100],      # P3: bottom-left / +Y 100 cm
 ], dtype=np.float32)
 
-# Red target HSV thresholds
-# These red points represent detected weed centers.
+# =========================================================
+# RED TARGET HSV THRESHOLDS
+# =========================================================
+# Initial stable red HSV values.
+# These are intended to detect the main large red target point.
+
 LOWER_RED_1 = np.array([0, 120, 120], dtype=np.uint8)
 UPPER_RED_1 = np.array([12, 255, 255], dtype=np.uint8)
 
 LOWER_RED_2 = np.array([165, 120, 120], dtype=np.uint8)
 UPPER_RED_2 = np.array([180, 255, 255], dtype=np.uint8)
 
-# Red point area filter
+# Area filter:
+# Small red dots/noise are rejected.
+# Main large red target is kept.
 MIN_RED_AREA = 5
 MAX_RED_AREA = 3000
 
@@ -48,6 +61,9 @@ clicked_points = []
 # =========================================================
 
 def mouse_callback(event, x, y, flags, param):
+    """
+    Stores mouse-clicked calibration points.
+    """
     global clicked_points
 
     if event == cv2.EVENT_LBUTTONDOWN:
@@ -57,12 +73,12 @@ def mouse_callback(event, x, y, flags, param):
 
 
 # =========================================================
-# HELPER FUNCTIONS
+# CALIBRATION POINT SELECTION
 # =========================================================
 
 def select_calibration_points(image):
     """
-    Manually select 4 calibration points with mouse.
+    Manually selects 4 calibration points with mouse.
 
     Selection order:
     P0: top-left corner / origin       -> (0, 0) cm
@@ -120,6 +136,10 @@ def select_calibration_points(image):
     return np.array(clicked_points, dtype=np.float32)
 
 
+# =========================================================
+# HOMOGRAPHY
+# =========================================================
+
 def compute_homography(image_points, world_points):
     """
     Computes homography from image pixel coordinates to world cm coordinates.
@@ -149,9 +169,20 @@ def pixel_to_cm(points_px, H):
     return pts_cm.reshape(-1, 2)
 
 
+# =========================================================
+# RED MASK AND DETECTION
+# =========================================================
+
 def build_red_mask(image):
     """
-    Builds red HSV mask for fixed red points.
+    Builds red HSV mask for the fixed large red target point.
+
+    red_mask_all:
+        This mask shows all pixels that pass the HSV red threshold.
+
+    Morphological OPEN and CLOSE are used:
+        OPEN  -> removes small red noise pixels.
+        CLOSE -> fills small gaps in the main red target.
     """
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
@@ -181,8 +212,10 @@ def build_red_mask(image):
 
 def detect_fixed_red_points(image):
     """
-    Detects existing red points in the image.
-    These red points are treated as detected weed centers.
+    Detects the existing large red point in the image.
+    This red point is treated as the detected weed center.
+
+    Small red dots are rejected using area filtering.
     """
     red_mask = build_red_mask(image)
 
@@ -194,11 +227,10 @@ def detect_fixed_red_points(image):
     detected_points = []
     kept_mask = np.zeros_like(red_mask)
 
+    print("\n[DEBUG] Connected red components:")
+
     for i in range(1, num_labels):
         area = stats[i, cv2.CC_STAT_AREA]
-
-        if area < MIN_RED_AREA or area > MAX_RED_AREA:
-            continue
 
         cx, cy = centroids[i]
 
@@ -207,26 +239,117 @@ def detect_fixed_red_points(image):
         w = stats[i, cv2.CC_STAT_WIDTH]
         h = stats[i, cv2.CC_STAT_HEIGHT]
 
+        print(
+            f"component {i}: center=({cx:.1f}, {cy:.1f}), "
+            f"area={area}, bbox=({x}, {y}, {w}, {h})"
+        )
+
+        if area < MIN_RED_AREA or area > MAX_RED_AREA:
+            print("    -> rejected by area filter")
+            continue
+
         detected_points.append({
             "center": (float(cx), float(cy)),
             "area": int(area),
-            "bbox": (int(x), int(y), int(w), int(h))
+            "bbox": (int(x), int(y), int(w), int(h)),
+            "label": i
         })
 
         kept_mask[labels == i] = 255
+        print("    -> accepted")
 
-    # Sort roughly from top-to-bottom, then left-to-right
-    detected_points = sorted(
-        detected_points,
-        key=lambda p: (int(p["center"][1] // 40), p["center"][0])
-    )
+    # If more than one valid red component remains, keep the largest one.
+    # This guarantees that only the main red weed target is used.
+    if len(detected_points) > 1:
+        detected_points = sorted(
+            detected_points,
+            key=lambda p: p["area"],
+            reverse=True
+        )
+
+        largest = detected_points[0]
+        kept_mask = np.zeros_like(red_mask)
+        kept_mask[labels == largest["label"]] = 255
+        detected_points = [largest]
+
+        print("[INFO] More than one valid red component found.")
+        print("[INFO] Keeping only the largest red component.")
+
+    print(f"[DEBUG] red_mask_all nonzero pixels: {cv2.countNonZero(red_mask)}")
+    print(f"[DEBUG] red_mask_kept nonzero pixels: {cv2.countNonZero(kept_mask)}")
 
     return detected_points, red_mask, kept_mask
 
 
+# =========================================================
+# DEBUG MASK VISIBILITY
+# =========================================================
+
+def save_visible_masks(red_mask_all, red_mask_kept):
+    """
+    Saves normal masks and also visually enlarged masks.
+
+    Normal masks are used for real detection.
+    Visible masks are only for human inspection because very small white
+    components may be hard to see in high-resolution images.
+    """
+
+    # Normal masks
+    red_mask_all_path = os.path.join(
+        OUTPUT_DIR,
+        "fixed_red_points_red_mask_all.png"
+    )
+
+    red_mask_kept_path = os.path.join(
+        OUTPUT_DIR,
+        "fixed_red_points_red_mask_kept.png"
+    )
+
+    cv2.imwrite(red_mask_all_path, red_mask_all)
+    cv2.imwrite(red_mask_kept_path, red_mask_kept)
+
+    # Dilated masks for visual inspection only
+    kernel_big = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+
+    red_mask_all_visible = cv2.dilate(
+        red_mask_all,
+        kernel_big,
+        iterations=1
+    )
+
+    red_mask_kept_visible = cv2.dilate(
+        red_mask_kept,
+        kernel_big,
+        iterations=2
+    )
+
+    red_mask_all_visible_path = os.path.join(
+        OUTPUT_DIR,
+        "fixed_red_points_red_mask_all_visible.png"
+    )
+
+    red_mask_kept_visible_path = os.path.join(
+        OUTPUT_DIR,
+        "fixed_red_points_red_mask_kept_visible.png"
+    )
+
+    cv2.imwrite(red_mask_all_visible_path, red_mask_all_visible)
+    cv2.imwrite(red_mask_kept_visible_path, red_mask_kept_visible)
+
+    print("\nSaved mask outputs:")
+    print(red_mask_all_path)
+    print(red_mask_kept_path)
+    print(red_mask_all_visible_path)
+    print(red_mask_kept_visible_path)
+
+
+# =========================================================
+# DRAWING FUNCTIONS
+# =========================================================
+
 def draw_calibration_points(image, image_points):
     """
-    Draws selected calibration points.
+    Draws selected calibration points and the calibration polygon.
     """
     labels = [
         "P0 origin (0,0)",
@@ -252,6 +375,7 @@ def draw_calibration_points(image, image_points):
         )
 
     polygon = image_points.reshape(-1, 1, 2).astype(np.int32)
+
     cv2.polylines(
         image,
         [polygon],
@@ -263,7 +387,7 @@ def draw_calibration_points(image, image_points):
 
 def draw_detected_red_results(image, detected_points, detected_points_cm):
     """
-    Draws detected red weed-center points and their cm coordinates.
+    Draws the detected red weed-center point and its cm coordinate.
     """
     output = image.copy()
 
@@ -278,7 +402,7 @@ def draw_detected_red_results(image, detected_points, detected_points_cm):
         py_i = int(round(py))
 
         # Draw detected center
-        cv2.circle(output, (px_i, py_i), 7, (0, 255, 0), -1)
+        cv2.circle(output, (px_i, py_i), 8, (0, 255, 0), -1)
 
         # Draw bounding box around red component
         cv2.rectangle(
@@ -355,23 +479,22 @@ def main():
     print("\nHomography matrix H:")
     print(H)
 
-    np.save(
-        os.path.join(OUTPUT_DIR, "H_img_to_cm_fixed_red_points.npy"),
-        H
-    )
+    H_path = os.path.join(OUTPUT_DIR, "H_img_to_cm_fixed_red_points.npy")
+    np.save(H_path, H)
 
     # -----------------------------------------------------
-    # 3) Detect existing fixed red points
+    # 3) Detect existing large red point
     # -----------------------------------------------------
     detected_points, red_mask_all, red_mask_kept = detect_fixed_red_points(image)
 
+    # Save masks immediately, even if detection fails
+    save_visible_masks(red_mask_all, red_mask_kept)
+
     if len(detected_points) == 0:
-        cv2.imwrite(
-            os.path.join(OUTPUT_DIR, "fixed_red_points_red_mask_all.png"),
-            red_mask_all
-        )
         raise RuntimeError(
-            "No fixed red points detected. Check fixed_red_points_red_mask_all.png."
+            "No large red point detected. "
+            "Check fixed_red_points_red_mask_all.png, "
+            "fixed_red_points_red_mask_kept.png, and visible versions."
         )
 
     print(f"\nDetected fixed red points: {len(detected_points)}")
@@ -387,12 +510,12 @@ def main():
         )
 
     # -----------------------------------------------------
-    # 4) Convert red point pixel centers to cm
+    # 4) Convert detected red point center to cm
     # -----------------------------------------------------
     red_points_px = [point["center"] for point in detected_points]
     red_points_cm = pixel_to_cm(red_points_px, H)
 
-    print("\nDetected red point coordinates in cm:")
+    print("\nDetected red point coordinate in cm:")
     for i, (point, cm_point) in enumerate(zip(detected_points, red_points_cm)):
         px, py = point["center"]
         X_cm, Y_cm = cm_point
@@ -416,28 +539,22 @@ def main():
     )
 
     # -----------------------------------------------------
-    # 6) Save outputs
+    # 6) Save final debug image
     # -----------------------------------------------------
-    cv2.imwrite(
-        os.path.join(OUTPUT_DIR, "fixed_red_points_red_mask_all.png"),
-        red_mask_all
+    final_debug_path = os.path.join(
+        OUTPUT_DIR,
+        "fixed_red_points_final_debug_cm.png"
     )
 
-    cv2.imwrite(
-        os.path.join(OUTPUT_DIR, "fixed_red_points_red_mask_kept.png"),
-        red_mask_kept
-    )
-
-    cv2.imwrite(
-        os.path.join(OUTPUT_DIR, "fixed_red_points_final_debug_cm.png"),
-        debug
-    )
+    cv2.imwrite(final_debug_path, debug)
 
     print("\nSaved outputs:")
-    print(os.path.join(OUTPUT_DIR, "H_img_to_cm_fixed_red_points.npy"))
+    print(H_path)
+    print(final_debug_path)
     print(os.path.join(OUTPUT_DIR, "fixed_red_points_red_mask_all.png"))
     print(os.path.join(OUTPUT_DIR, "fixed_red_points_red_mask_kept.png"))
-    print(os.path.join(OUTPUT_DIR, "fixed_red_points_final_debug_cm.png"))
+    print(os.path.join(OUTPUT_DIR, "fixed_red_points_red_mask_all_visible.png"))
+    print(os.path.join(OUTPUT_DIR, "fixed_red_points_red_mask_kept_visible.png"))
 
 
 if __name__ == "__main__":
