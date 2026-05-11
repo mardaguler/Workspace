@@ -7,13 +7,13 @@ from pathlib import Path
 # SETTINGS
 # =========================================================
 
-IMAGE_PATH = "/home/ozu/Desktop/Workspace/Captured/raw_2026-05-07_17-09-13.png"
+IMAGE_PATH = "/home/ozu/Desktop/Workspace/Captured/raw_2026-05-11_15-33-33.png"
 
 OUTPUT_DIR = "/home/ozu/Desktop/Workspace/Annotated Images/Chessboard_Homography_Results"
 # Chessboard inner corner count
 # If physical board has 8 squares x 6 squares,
 # inner corner pattern is 7 x 5.
-PATTERN_SIZE = (7, 5)
+PATTERN_SIZE = (5, 7)
 
 # Physical square size in cm
 # 34 mm = 3.4 cm
@@ -267,23 +267,27 @@ def save_visible_masks(red_mask_all, red_mask_kept):
 
 def detect_and_order_chessboard_corners(image, pattern_size):
     """
-    Detects chessboard inner corners and forces the order:
+    Detects chessboard inner corners and orders them for the rotated chessboard case.
 
-        grid[0, 0]   = top-left inner corner
-        grid[0, -1]  = top-right inner corner
-        grid[-1, -1] = bottom-right inner corner
-        grid[-1, 0]  = bottom-left inner corner
+    Desired image-based order after 90 degree rotation:
 
-    Output:
-        corrected_corners: OpenCV corner format, ordered
-        img_pts: Nx2 image points, ordered
+        grid[0, 0]   = image top-left inner corner
+        grid[0, -1]  = image top-right inner corner
+        grid[-1, -1] = image bottom-right inner corner
+        grid[-1, 0]  = image bottom-left inner corner
+
+    Coordinate convention after this ordering:
+        Origin = top-left inner corner
+        +X     = image-right direction
+        +Y     = image-down direction
     """
+
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     ret = False
     corners = None
 
-    # Try stronger SB method first
+    # Try stronger SB detector first
     try:
         flags_sb = cv2.CALIB_CB_NORMALIZE_IMAGE
         ret, corners = cv2.findChessboardCornersSB(
@@ -295,7 +299,7 @@ def detect_and_order_chessboard_corners(image, pattern_size):
         ret = False
         corners = None
 
-    # Fallback to classic method
+    # Fallback to classic detector
     if not ret:
         flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
 
@@ -323,7 +327,7 @@ def detect_and_order_chessboard_corners(image, pattern_size):
     if not ret:
         raise RuntimeError(
             "Chessboard corners could not be detected. "
-            "Check PATTERN_SIZE, lighting, focus, and board visibility."
+            "For 90 degree rotated chessboard, try PATTERN_SIZE = (5, 7)."
         )
 
     corners = corners.astype(np.float32)
@@ -333,15 +337,35 @@ def detect_and_order_chessboard_corners(image, pattern_size):
 
     corners_grid = corners.reshape(rows, cols, 2)
 
-    # Force top-left inner corner as grid[0,0]
+    # -----------------------------------------------------
+    # Force image-based orientation
+    # -----------------------------------------------------
+    # We want:
+    # row 0 = physically upper row in the image
+    # col 0 = physically left column in the image
+
+    # If first row is lower than last row, flip vertically
     if corners_grid[0, :, 1].mean() > corners_grid[-1, :, 1].mean():
         corners_grid = corners_grid[::-1, :, :]
 
+    # If first column is right of last column, flip horizontally
     if corners_grid[:, 0, 0].mean() > corners_grid[:, -1, 0].mean():
         corners_grid = corners_grid[:, ::-1, :]
 
     img_pts = corners_grid.reshape(-1, 2).astype(np.float32)
     corrected_corners = img_pts.reshape(-1, 1, 2)
+
+    # Debug print
+    top_left = corners_grid[0, 0]
+    top_right = corners_grid[0, -1]
+    bottom_left = corners_grid[-1, 0]
+    bottom_right = corners_grid[-1, -1]
+
+    print("\n[CHESSBOARD ORDER DEBUG]")
+    print(f"Top-left inner     = ({top_left[0]:.1f}, {top_left[1]:.1f})")
+    print(f"Top-right inner    = ({top_right[0]:.1f}, {top_right[1]:.1f})")
+    print(f"Bottom-left inner  = ({bottom_left[0]:.1f}, {bottom_left[1]:.1f})")
+    print(f"Bottom-right inner = ({bottom_right[0]:.1f}, {bottom_right[1]:.1f})")
 
     return corrected_corners, img_pts
 
@@ -375,9 +399,21 @@ def compute_outer_origin_from_inner_corner_pixels(img_pts, pattern_size, square_
 
     inner_origin_px = grid[0, 0]
 
-    # One chessboard square in pixel vector form near the origin
-    x_square_vec_px = grid[0, 1] - grid[0, 0]
-    y_square_vec_px = grid[1, 0] - grid[0, 0]
+    raw_x_square_vec_px = grid[0, 1] - grid[0, 0]
+    raw_y_square_vec_px = grid[1, 0] - grid[0, 0]
+
+# For origin shifting, use actual detected chessboard vectors
+    outer_origin_px = inner_origin_px - raw_x_square_vec_px - raw_y_square_vec_px
+
+# For drawing workspace axes, force desired directions
+    x_square_vec_px = raw_x_square_vec_px.copy()
+    y_square_vec_px = raw_y_square_vec_px.copy()
+
+    if x_square_vec_px[0] < 0:
+        x_square_vec_px = -x_square_vec_px
+
+    if y_square_vec_px[1] < 0:
+        y_square_vec_px = -y_square_vec_px
 
     x_square_px = float(np.linalg.norm(x_square_vec_px))
     y_square_px = float(np.linalg.norm(y_square_vec_px))
@@ -503,53 +539,42 @@ def compute_homography_outer_origin(img_pts, pattern_size, square_size_cm):
 # 94 CM X AND 100 CM Y AXIS EXTENSION
 # =========================================================
 
-def draw_workspace_axes_from_outer_origin(image, origin_info):
+def draw_axes_using_homography(image, H_outer):
     """
-    Draws workspace axes from the outer top-left chessboard origin.
+    Draws +X and +Y workspace axes using inverse homography.
 
-    +X axis length = 94 cm
-    +Y axis length = 100 cm
+    H_outer maps:
+        image pixel -> outer-origin cm coordinate
 
-    Uses chessboard pixel vectors:
-        x_square_vec_px corresponds to 3.4 cm in +X
-        y_square_vec_px corresponds to 3.4 cm in +Y
+    H_cm_to_img maps:
+        outer-origin cm coordinate -> image pixel
+
+    Axis lengths:
+        +X = X_AXIS_LENGTH_CM cm
+        +Y = Y_AXIS_LENGTH_CM cm
     """
+
     output = image.copy()
 
-    outer_origin_px = origin_info["outer_origin_px"]
-    x_square_vec_px = origin_info["x_square_vec_px"]
-    y_square_vec_px = origin_info["y_square_vec_px"]
+    # Inverse homography: cm coordinate -> image pixel coordinate
+    H_cm_to_img = np.linalg.inv(H_outer)
 
-    x_scale = X_AXIS_LENGTH_CM / SQUARE_SIZE_CM
-    y_scale = Y_AXIS_LENGTH_CM / SQUARE_SIZE_CM
+    # Workspace axis points in cm
+    origin_cm = np.array([[0, 0]], dtype=np.float32)
+    x_end_cm = np.array([[X_AXIS_LENGTH_CM, 0]], dtype=np.float32)
+    y_end_cm = np.array([[0, Y_AXIS_LENGTH_CM]], dtype=np.float32)
 
-    x_axis_vec_px = x_square_vec_px * x_scale
-    y_axis_vec_px = y_square_vec_px * y_scale
+    # Project cm points back to image pixels
+    origin_px = transform_points(origin_cm, H_cm_to_img)[0]
+    x_end_px = transform_points(x_end_cm, H_cm_to_img)[0]
+    y_end_px = transform_points(y_end_cm, H_cm_to_img)[0]
 
-    x_axis_end_px = outer_origin_px + x_axis_vec_px
-    y_axis_end_px = outer_origin_px + y_axis_vec_px
+    origin_i = tuple(np.round(origin_px).astype(int))
+    x_end_i = tuple(np.round(x_end_px).astype(int))
+    y_end_i = tuple(np.round(y_end_px).astype(int))
 
-    origin_i = tuple(np.round(outer_origin_px).astype(int))
-    x_end_i = tuple(np.round(x_axis_end_px).astype(int))
-    y_end_i = tuple(np.round(y_axis_end_px).astype(int))
-
+    # Draw origin
     cv2.circle(output, origin_i, 14, (0, 0, 255), -1)
-
-    cv2.arrowedLine(
-        output,
-        origin_i,
-        x_end_i,
-        (0, 255, 0),
-        4
-    )
-
-    cv2.arrowedLine(
-        output,
-        origin_i,
-        y_end_i,
-        (255, 0, 0),
-        4
-    )
 
     cv2.putText(
         output,
@@ -559,6 +584,15 @@ def draw_workspace_axes_from_outer_origin(image, origin_info):
         0.9,
         (0, 0, 255),
         2
+    )
+
+    # Draw +X axis
+    cv2.arrowedLine(
+        output,
+        origin_i,
+        x_end_i,
+        (0, 255, 0),
+        4
     )
 
     cv2.putText(
@@ -571,6 +605,15 @@ def draw_workspace_axes_from_outer_origin(image, origin_info):
         2
     )
 
+    # Draw +Y axis
+    cv2.arrowedLine(
+        output,
+        origin_i,
+        y_end_i,
+        (255, 0, 0),
+        4
+    )
+
     cv2.putText(
         output,
         f"+Y {Y_AXIS_LENGTH_CM:.0f} cm",
@@ -581,35 +624,38 @@ def draw_workspace_axes_from_outer_origin(image, origin_info):
         2
     )
 
-    info = (
-        f"{X_AXIS_LENGTH_CM:.0f} cm X = {np.linalg.norm(x_axis_vec_px):.1f}px, "
-        f"{Y_AXIS_LENGTH_CM:.0f} cm Y = {np.linalg.norm(y_axis_vec_px):.1f}px"
+    # Debug information
+    x_axis_px_len = np.linalg.norm(x_end_px - origin_px)
+    y_axis_px_len = np.linalg.norm(y_end_px - origin_px)
+
+    info_text = (
+        f"Homography axes: "
+        f"X={X_AXIS_LENGTH_CM:.0f}cm ({x_axis_px_len:.1f}px), "
+        f"Y={Y_AXIS_LENGTH_CM:.0f}cm ({y_axis_px_len:.1f}px)"
     )
 
     cv2.putText(
         output,
-        info,
+        info_text,
         (30, output.shape[0] - 30),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
+        0.75,
         (0, 255, 255),
         2
     )
 
     out_path = os.path.join(
         OUTPUT_DIR,
-        f"outer_origin_{int(X_AXIS_LENGTH_CM)}x{int(Y_AXIS_LENGTH_CM)}cm_axes.png"
+        "homography_projected_96x103_axes.png"
     )
 
     cv2.imwrite(out_path, output)
 
-    print(
-        f"[INFO] Saved {X_AXIS_LENGTH_CM:.0f} cm X / "
-        f"{Y_AXIS_LENGTH_CM:.0f} cm Y axis debug image: {out_path}"
-    )
-    print(f"[INFO] X {X_AXIS_LENGTH_CM:.0f} cm vector length = {np.linalg.norm(x_axis_vec_px):.2f} px")
-    print(f"[INFO] Y {Y_AXIS_LENGTH_CM:.0f} cm vector length = {np.linalg.norm(y_axis_vec_px):.2f} px")
+    print(f"[INFO] Saved homography-projected axes image: {out_path}")
+    print(f"[INFO] X axis: {X_AXIS_LENGTH_CM:.1f} cm -> {x_axis_px_len:.2f} px")
+    print(f"[INFO] Y axis: {Y_AXIS_LENGTH_CM:.1f} cm -> {y_axis_px_len:.2f} px")
 
+    return output
 
 # =========================================================
 # VISUALIZATION
@@ -813,7 +859,14 @@ def draw_outer_origin_final_debug(
 ):
     """
     Draws final debug image using outer top-left chessboard corner as origin.
+
+    Important:
+    Workspace axes are drawn using local pixel vectors, not inverse homography.
+    This makes +X and +Y visually extend by:
+        X_AXIS_LENGTH_CM * px/cm_X
+        Y_AXIS_LENGTH_CM * px/cm_Y
     """
+
     output = image.copy()
 
     cv2.drawChessboardCorners(
@@ -823,28 +876,38 @@ def draw_outer_origin_final_debug(
         True
     )
 
-    H_cm_to_img = np.linalg.inv(H_outer)
-
-    # For visual workspace axes:
-    outer_origin_cm = np.array([[0, 0]], dtype=np.float32)
-    outer_x_axis_cm = np.array([[X_AXIS_LENGTH_CM, 0]], dtype=np.float32)
-    outer_y_axis_cm = np.array([[0, Y_AXIS_LENGTH_CM]], dtype=np.float32)
-
+    # -----------------------------------------------------
+    # Draw workspace axes using pixel vectors
+    # -----------------------------------------------------
     outer_origin_px = origin_info["outer_origin_px"]
 
-    outer_x_axis_px = transform_points(outer_x_axis_cm, H_cm_to_img)[0]
-    outer_y_axis_px = transform_points(outer_y_axis_cm, H_cm_to_img)[0]
+    x_square_vec_px = origin_info["x_square_vec_px"]
+    y_square_vec_px = origin_info["y_square_vec_px"]
 
-    outer_origin_px_int = tuple(np.round(outer_origin_px).astype(int))
-    outer_x_axis_px_int = tuple(np.round(outer_x_axis_px).astype(int))
-    outer_y_axis_px_int = tuple(np.round(outer_y_axis_px).astype(int))
+    # Force +X to go visually to the right
+    if x_square_vec_px[0] < 0:
+        x_square_vec_px = -x_square_vec_px
 
-    cv2.circle(output, outer_origin_px_int, 12, (0, 0, 255), -1)
+    # Force +Y to go visually downward
+    if y_square_vec_px[1] < 0:
+        y_square_vec_px = -y_square_vec_px
+
+    x_axis_vec_px = x_square_vec_px * (X_AXIS_LENGTH_CM / SQUARE_SIZE_CM)
+    y_axis_vec_px = y_square_vec_px * (Y_AXIS_LENGTH_CM / SQUARE_SIZE_CM)
+
+    x_axis_end_px = outer_origin_px + x_axis_vec_px
+    y_axis_end_px = outer_origin_px + y_axis_vec_px
+
+    origin_i = tuple(np.round(outer_origin_px).astype(int))
+    x_end_i = tuple(np.round(x_axis_end_px).astype(int))
+    y_end_i = tuple(np.round(y_axis_end_px).astype(int))
+
+    cv2.circle(output, origin_i, 14, (0, 0, 255), -1)
 
     cv2.putText(
         output,
         "OUTER ORIGIN (0,0)",
-        (outer_origin_px_int[0] + 10, outer_origin_px_int[1] - 10),
+        (origin_i[0] + 10, origin_i[1] - 10),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
         (0, 0, 255),
@@ -853,24 +916,24 @@ def draw_outer_origin_final_debug(
 
     cv2.arrowedLine(
         output,
-        outer_origin_px_int,
-        outer_x_axis_px_int,
+        origin_i,
+        x_end_i,
         (0, 255, 0),
-        3
+        4
     )
 
     cv2.arrowedLine(
         output,
-        outer_origin_px_int,
-        outer_y_axis_px_int,
+        origin_i,
+        y_end_i,
         (255, 0, 0),
-        3
+        4
     )
 
     cv2.putText(
         output,
         f"+X {X_AXIS_LENGTH_CM:.0f} cm",
-        (outer_x_axis_px_int[0] + 10, outer_x_axis_px_int[1]),
+        (x_end_i[0] + 10, x_end_i[1]),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
         (0, 255, 0),
@@ -880,14 +943,16 @@ def draw_outer_origin_final_debug(
     cv2.putText(
         output,
         f"+Y {Y_AXIS_LENGTH_CM:.0f} cm",
-        (outer_y_axis_px_int[0] + 10, outer_y_axis_px_int[1]),
+        (y_end_i[0] + 10, y_end_i[1]),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
         (255, 0, 0),
         2
     )
 
+    # -----------------------------------------------------
     # Draw detected red point
+    # -----------------------------------------------------
     for i, (point, outer_cm) in enumerate(
         zip(detected_points, red_points_outer_cm)
     ):
@@ -935,19 +1000,25 @@ def draw_outer_origin_final_debug(
             2
         )
 
+    # -----------------------------------------------------
+    # Debug text
+    # -----------------------------------------------------
+    x_axis_px_len = np.linalg.norm(x_axis_vec_px)
+    y_axis_px_len = np.linalg.norm(y_axis_vec_px)
+
     info_text_1 = (
         f"Workspace axes: X={X_AXIS_LENGTH_CM:.0f} cm, "
         f"Y={Y_AXIS_LENGTH_CM:.0f} cm"
     )
 
     info_text_2 = (
-        f"Local px/cm: X={origin_info['px_per_cm_x']:.2f}, "
-        f"Y={origin_info['px_per_cm_y']:.2f}"
+        f"Axis px length: X={x_axis_px_len:.1f}px, "
+        f"Y={y_axis_px_len:.1f}px"
     )
 
     info_text_3 = (
-        f"Avg px/cm: X={average_scale_info['px_per_cm_x_avg']:.2f}, "
-        f"Y={average_scale_info['px_per_cm_y_avg']:.2f}"
+        f"Local px/cm: X={origin_info['px_per_cm_x']:.2f}, "
+        f"Y={origin_info['px_per_cm_y']:.2f}"
     )
 
     cv2.putText(
@@ -988,6 +1059,8 @@ def draw_outer_origin_final_debug(
     cv2.imwrite(out_path, output)
 
     print(f"[INFO] Saved final outer-origin debug image: {out_path}")
+    print(f"[INFO] Final X axis length = {x_axis_px_len:.2f} px")
+    print(f"[INFO] Final Y axis length = {y_axis_px_len:.2f} px")
 
 
 # =========================================================
@@ -1075,13 +1148,7 @@ def main():
         origin_info
     )
 
-    # -----------------------------------------------------
-    # 5) Draw 94 cm X and 100 cm Y axis arrows using local px/cm vectors
-    # -----------------------------------------------------
-    draw_workspace_axes_from_outer_origin(
-        image,
-        origin_info
-    )
+   
 
     # -----------------------------------------------------
     # 6) Build homography directly with OUTER top-left origin
@@ -1104,6 +1171,11 @@ def main():
         os.path.join(OUTPUT_DIR, "H_img_to_chessboard_outer_cm.txt"),
         H_outer
     )
+
+     # -----------------------------------------------------
+    # 5) Draw 94 cm X and 100 cm Y axis arrows using local px/cm vectors
+    # -----------------------------------------------------
+    draw_axes_using_homography(image, H_outer)
 
     # -----------------------------------------------------
     # 7) Convert red weed pixel point to OUTER-origin cm
