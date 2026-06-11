@@ -1,6 +1,7 @@
 from picamera2 import Picamera2
 import time
 from datetime import datetime
+from pathlib import Path
 import cv2
 import numpy as np
 import boto3
@@ -44,11 +45,11 @@ def upload_to_s3(file_path):
     except Exception as e:
         print(f"S3 upload error: {e}")
 
-
+"""
 data = np.load("Calibration_Results/camera_calibration.npz")
 camera_matrix = data["mtx"]
 dist_coeffs = data["dist"]
-
+"""
 camera = Picamera2()
 
 config = camera.create_still_configuration(
@@ -62,18 +63,29 @@ camera.start()
 
 frame = camera.capture_array()
 
+BASE_DIR = Path(__file__).resolve().parent
+
+SERVICE_CAPTURE_DIR = BASE_DIR / "Captured_by_Service"
+SERVICE_CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
+
 timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+raw_path = SERVICE_CAPTURE_DIR / f"raw_{timestamp}.png"
 
 
 
 raw_filename = f"Captured/raw_{timestamp}.png"
 undist_filename = f"Captured/undist_{timestamp}.png"
 # opencv use bgr format, picamera use rgb format, so we need to convert to bgr
-# to work in opencv
-frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+# to work in opencv for undistoriton, to distorted , no need for bgr
+#frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
 #local ve remote kaydet
-cv2.imwrite(raw_filename, frame)
+#cv2.imwrite(raw_filename, frame)
+ok = cv2.imwrite(str(raw_path), frame)
+
+if not ok:
+    raise RuntimeError(f"Fotoğraf kaydedilemedi: {raw_path}")
 upload_to_s3(raw_filename)
 
 # =========================
